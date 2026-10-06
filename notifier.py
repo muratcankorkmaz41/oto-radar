@@ -1,43 +1,77 @@
+import asyncio
+import html
 from telegram import Bot
 
+
+def _tl(value: int) -> str:
+    """1375000 -> 1.375.000"""
+    return f"{value:,}".replace(",", ".")
+
+
 class TelegramNotifier:
-    def __init__(self, token: str, chat_id: str):
+    def __init__(self, token: str, chat_id: str, max_tries: int = 3, retry_delay: float = 3):
         self.token = token
         self.chat_id = chat_id
+        self.max_tries = max_tries
+        self.retry_delay = retry_delay
         self.bot = Bot(token=token) if token != "BURAYA_BOT_TOKEN_YAZILACAK" else None
 
-    async def send_listing_alert(self, ad: dict):
+    def _badge(self, ad: dict) -> str:
+        agir = ad.get("agir_hasarli")
+        boya = ad.get("boya_degisen") or ""
+
+        # Detay sayfası okunduysa gerçek bilgiye göre rozet
+        if agir is not None or boya:
+            if agir == "Evet":
+                return "⚠️ Ağır Hasarlı Araç"
+            if agir == "Hayır" and boya.startswith("tamamı"):
+                return "💎 Hatasız / Boyasız"
+            return "🚗 Radar Eşleşti!"
+
+        # Detay yoksa başlıktan tahmin edilen bilgiye göre
+        damage_tag = ad.get("damage_info") or "Standart"
+        if "Ağır" in damage_tag:
+            return "⚠️ Ağır Hasarlı Araç"
+        if "Hatasız" in damage_tag or "Boyasız" in damage_tag:
+            return "💎 Hatasız / Boyasız"
+        return "🚗 Radar Eşleşti!"
+
+    async def send_listing_alert(self, ad: dict) -> bool:
+        """Mesaj gitti ise True, gitmediyse False döner."""
         if not self.bot:
-            return
+            return True  # Token girilmemiş, bildirim kapalı sayılır
 
         year_text = f"{ad['year']} Model" if ad.get("year") else "Yıl Belirtilmemiş"
-        km_text = f"{ad['km']:,} KM".replace(",", ".") if ad.get("km") else "KM Belirtilmemiş"
-        damage_tag = ad.get("damage_info", "Standart")
-        
-        # Hasar durumuna göre rozet
-        badge = "🚗 Radar Eşleşti!"
-        if "Ağır" in damage_tag:
-            badge = "⚠️ Ağır Hasarlı Araç"
-        elif "Hatasız" in damage_tag or "Boyasız" in damage_tag:
-            badge = "💎 Hatasız / Boyasız"
+        km_text = f"{_tl(ad['km'])} KM" if ad.get("km") else "KM Belirtilmemiş"
+        damage_tag = ad.get("damage_info") or "Standart"
 
         mesaj = (
-            f"<b>{badge}</b>\n\n"
-            f"📌 <b>İlan:</b> {ad['title']}\n"
+            f"<b>{self._badge(ad)}</b>\n\n"
+            f"📌 <b>İlan:</b> {html.escape(ad['title'])}\n"
             f"📅 <b>Yıl:</b> {year_text}\n"
             f"🛣️ <b>Kilometre:</b> {km_text}\n"
-            f"🛠️ <b>Hasar Durumu:</b> {damage_tag}\n"
-            f"💰 <b>Fiyat:</b> {ad['price']:,} TL\n".replace(",", ".") +
-            f"📍 <b>Konum:</b> {ad.get('location', 'Belirtilmemiş')}\n\n"
+            f"🛠️ <b>Hasar Durumu:</b> {html.escape(damage_tag)}\n"
+            f"💰 <b>Fiyat:</b> {_tl(ad['price'])} TL\n"
+            f"📍 <b>Konum:</b> {html.escape(ad.get('location') or 'Belirtilmemiş')}\n\n"
             f"🔗 <a href='{ad['url']}'>İlana Git</a>"
         )
 
-        try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=mesaj,
-                parse_mode="HTML"
-            )
-            print(f"[Bildirim Gönderildi] {ad['title']}")
-        except Exception as e:
-            print(f"[Bildirim Hatası]: {e}")
+        for deneme in range(1, self.max_tries + 1):
+            try:
+                await self.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=mesaj,
+                    parse_mode="HTML",
+                    read_timeout=30,
+                    write_timeout=30,
+                    connect_timeout=30,
+                )
+                print(f"[Bildirim Gönderildi] {ad['title']}")
+                return True
+            except Exception as e:
+                print(f"[Bildirim Hatası] ({deneme}/{self.max_tries}): {e}")
+                if deneme < self.max_tries:
+                    await asyncio.sleep(self.retry_delay)
+
+        print("[!] Bildirim gönderilemedi, ilan kaydedilmedi, sonraki turda tekrar denenecek.")
+        return False
