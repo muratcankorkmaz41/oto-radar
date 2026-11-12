@@ -1,0 +1,4 @@
+Flask>=3.0
+playwright>=1.45
+beautifulsoup4>=4.12
+python-telegram-bot>=21.0
